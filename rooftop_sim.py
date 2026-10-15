@@ -39,16 +39,16 @@ ANGLE_B = 90.0           # [deg]
 
 # diffusion : 0 = perfect mirror ... 1 = complete scatter (matte)
 # absorption: 0 = absorbs nothing ... 1 = absorbs everything
-MATERIAL_A = dict(diffusion=0.9, absorption=0.2)
-MATERIAL_B = dict(diffusion=0.9, absorption=0.8)
+MATERIAL_A = dict(diffusion=0.6, absorption=0.6)
+MATERIAL_B = dict(diffusion=0.6, absorption=0.5)
 
 # ---- sun -------------------------------------------------------------------
-SUN_ELEVATION = 100.0    # [deg] 90 = overhead, < 90 sun on the right, > 90 on the left
+SUN_ELEVATION = 140.0    # [deg] 90 = overhead, < 90 sun on the right, > 90 on the left
 
 # ---- simulation ------------------------------------------------------------
 N_SUN_RAYS = 1000        # parallel rays of sunlight
 N_DIFFUSE = 100          # rays a (non-mirror) reflection is split into
-MAX_DEPTH = 2            # max number of bounces per ray
+MAX_DEPTH = 4            # max number of bounces per ray
 MIN_INTENSITY = 1e-4     # rays carrying less energy than this are dropped
 GLOSS_SHARPNESS = 20.0   # how fast the reflection lobe narrows as diffusion -> 0
 
@@ -364,8 +364,7 @@ def color_norm():
 
 
 def plot(segments, pieces, stats, sun_elevation, title="Rooftop reflectivity"):
-    fig, (ax, ax_bar) = plt.subplots(
-        1, 2, figsize=(15, 7), gridspec_kw=dict(width_ratios=[3, 1]))
+    fig, ax = plt.subplots(figsize=(10, 7))
 
     # incoming rays (optional), drawn thin and grey
     if SHOW_INCOMING:
@@ -406,7 +405,7 @@ def plot(segments, pieces, stats, sun_elevation, title="Rooftop reflectivity"):
     ax.set_ylim(pts[:, 1].min() - pad, pts[:, 1].max() + 2 * pad)
     ax.set_aspect("equal")
     ax.set_facecolor("white")
-    ax.set_title(title)
+    ax.set_title(f"{title}   (reflectivity = {stats['reflectivity']:.3f})")
 
     # arrows along the roof showing the direction of the incoming sunlight:
     # each arrow follows a real sun ray and stops just before it hits the roof
@@ -420,18 +419,6 @@ def plot(segments, pieces, stats, sun_elevation, title="Rooftop reflectivity"):
         ax.annotate("", xy=head, xytext=head - ray.direction * length, zorder=6,
                     arrowprops=dict(arrowstyle="-|>", color="darkorange", lw=2,
                                     mutation_scale=15))
-
-    # energy balance
-    total_abs = sum(s.absorbed for s in segments)
-    labels = ["absorbed\n(roof)", "escaped\nup", "escaped\ndown/side", "dropped"]
-    values = [total_abs, stats["escaped_up"],
-              stats["escaped"] - stats["escaped_up"], stats["dropped"]]
-    ax_bar.bar(labels, values, color=["#c44", "#4a4", "#46c", "#888"])
-    ax_bar.set_ylabel("fraction of energy hitting the roof")
-    ax_bar.set_title(f"Energy balance  (reflectivity = {stats['reflectivity']:.3f})")
-    for i, v in enumerate(values):
-        ax_bar.text(i, v, f"{v:.3f}", ha="center", va="bottom")
-    ax_bar.set_ylim(0, 1.1)
 
     plt.tight_layout()
     plt.show()

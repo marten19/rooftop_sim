@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 from matplotlib.collections import LineCollection
 
 import rooftop_sim as sim
@@ -29,15 +29,16 @@ SUNRISE_HOUR = 6.0       # time at which the sun is at SUN_START_ANGLE
 SUNSET_HOUR = 18.0       # time at which the sun is at SUN_END_ANGLE
 SUN_START_ANGLE = 5.0    # [deg] sun elevation at sunrise (right side, east)
 SUN_END_ANGLE = 175.0    # [deg] sun elevation at sunset (left side, west)
-N_FRAMES = 72*2            # frames over the day (the sun angle changes linearly)
+N_FRAMES = 20            # frames over the day (the sun angle changes linearly)
 
 # ---- simulation (lower than rooftop_sim.py to keep it fast) ----------------
 N_SUN_RAYS = 500
 N_DIFFUSE = 100
 
 # ---- output ----------------------------------------------------------------
-FPS = 12*2
-SAVE_GIF = "sun_day.gif"  # file name, or None to not save
+FPS = 5
+SAVE_MP4 = "sun_day.mp4"  # file name, or None to not save (needs ffmpeg)
+SAVE_GIF = None           # file name, or None to not save
 SHOW = False               # also open a window with the animation
 
 
@@ -50,16 +51,18 @@ def use_animation_settings():
     sim.N_DIFFUSE = N_DIFFUSE
 
 
-def build_roof():
+def build_roof(material_a=None, material_b=None):
+    """The roof from rooftop_sim.py, optionally with other materials."""
     roof, _, _ = sim.stair_roof(sim.ROOF_START, sim.ROOF_SLOPE, sim.ROOF_LENGTH,
                                 sim.N_STEPS, sim.ANGLE_A, sim.ANGLE_B,
-                                sim.MATERIAL_A, sim.MATERIAL_B)
+                                material_a or sim.MATERIAL_A,
+                                material_b or sim.MATERIAL_B)
     return roof
 
 
-def compute_frame(sun_angle):
+def compute_frame(sun_angle, material_a=None, material_b=None):
     """Trace one sun position. Returns everything needed to draw the frame."""
-    roof = build_roof()
+    roof = build_roof(material_a, material_b)
 
     # arrows: real sun rays, stopping just before they hit the roof
     ray_len = 0.12 * (sim.ROOF_LENGTH + 15)
@@ -75,6 +78,7 @@ def compute_frame(sun_angle):
     except ValueError:            # sun behind the roof: no light on it
         return dict(lines=np.zeros((0, 2, 2)), strength=np.zeros(0),
                     reflectivity=np.nan, absorbed=np.nan, incident=0.0,
+                    reflected_below=np.nan, max_sky_strength=np.nan,
                     arrows=arrows)
 
     refl = sorted((p for p in pieces if p.depth > 0), key=lambda p: p.strength)
@@ -86,10 +90,74 @@ def compute_frame(sun_angle):
     spacing = sim.sun_rays(roof, sun_angle, sim.N_SUN_RAYS)[0].intensity
     incident = spacing * sum(1 for p in pieces if p.depth == 0)
 
+    # strongest reflected ray that leaves the scene upwards (to the sky).
+    # Rays leaving the scene are drawn exactly SCENE_SIZE long.
+    to_sky = [p.strength for p in refl
+              if p.end[1] > p.start[1]
+              and np.isclose(np.linalg.norm(p.end - p.start), sim.SCENE_SIZE)]
+
     return dict(lines=lines, strength=strength,
                 reflectivity=stats["reflectivity"],
                 absorbed=sum(s.absorbed for s in roof),
+                reflected_below=stats["escaped"] - stats["escaped_up"],
+                max_sky_strength=max(to_sky, default=0.0),
                 incident=incident, arrows=arrows)
+
+
+def clock(hour):
+    return f"{int(hour):02d}:{int(round(hour % 1 * 60)) % 60:02d}"
+
+
+def day_results(frames, hours):
+    """
+    The four results of the day simulation, as a dict. Fractions are of the
+    sunlight hitting the roof; the sky intensity is the strongest single ray
+    (1 = direct sunlight). Returns None if the sun never reaches the roof.
+    """
+    def col(key):
+        return np.array([f[key] for f in frames], dtype=float)
+
+    incident = col("incident")
+    lit = incident > 0
+    if not lit.any():
+        return None
+
+    def peak(key):
+        values = col(key)
+        i = np.nanargmax(values)
+        return values[i], clock(hours[i])
+
+    def whole_day(key):   # weighted by the sunlight hitting the roof
+        values = col(key)
+        return np.sum(values[lit] * incident[lit]) / np.sum(incident[lit])
+
+    r1, t1 = peak("reflected_below")
+    r2, t2 = peak("max_sky_strength")
+    r3, t3 = peak("absorbed")
+    return dict(max_reflected_below=r1, max_reflected_below_time=t1,
+                max_sky_intensity=r2, max_sky_intensity_time=t2,
+                max_absorption=r3, max_absorption_time=t3,
+                overall_absorption=whole_day("absorbed"),
+                overall_reflectivity=whole_day("reflectivity"))
+
+
+def print_results(frames, hours):
+    r = day_results(frames, hours)
+    if r is None:
+        print("the sun never reaches the outside of the roof")
+        return
+    print()
+    print("RESULTS (day simulation)")
+    print(f"  #1 max power reflected below the horizon : {r['max_reflected_below']:.3f}"
+          f"   at {r['max_reflected_below_time']}   (fraction of sunlight on the roof)")
+    print(f"  #2 max reflection intensity to the sky   : {r['max_sky_intensity']:.3f}"
+          f"   at {r['max_sky_intensity_time']}   (strongest ray, 1 = direct sunlight)")
+    print(f"  #3 max absorption                        : {r['max_absorption']:.3f}"
+          f"   at {r['max_absorption_time']}   (fraction of sunlight on the roof)")
+    print(f"  #4 overall absorption (whole day)        : {r['overall_absorption']:.3f}"
+          "            (weighted by sunlight on the roof)")
+    print(f"     overall reflectivity (whole day)      : {r['overall_reflectivity']:.3f}")
+    print()
 
 
 # =============================================================================
@@ -105,16 +173,10 @@ def main():
     with ProcessPoolExecutor(initializer=use_animation_settings) as pool:
         frames = list(pool.map(compute_frame, angles))
 
-    refl = np.array([f["reflectivity"] for f in frames])
-    absorbed = np.array([f["absorbed"] for f in frames])
-    incident = np.array([f["incident"] for f in frames])
-    lit = incident > 0
-    day_avg = np.sum(refl[lit] * incident[lit]) / np.sum(incident[lit])
-    print(f"daily average reflectivity (weighted by sunlight on the roof): {day_avg:.3f}")
+    print_results(frames, hours)
 
     # ---- figure layout
-    fig, (ax, ax_day) = plt.subplots(
-        1, 2, figsize=(15, 7), gridspec_kw=dict(width_ratios=[3, 2]))
+    fig, ax = plt.subplots(figsize=(10, 7))
 
     roof = build_roof()
     pts = np.array([s.p1 for s in roof] + [s.p2 for s in roof])
@@ -148,24 +210,9 @@ def main():
     rays = LineCollection([], linewidths=sim.RAY_WIDTH)
     ax.add_collection(rays)
     sun_dot, = ax.plot([], [], "o", ms=18, color="gold", mec="darkorange", zorder=7)
-    clock = ax.text(0.98, 0.97, "", transform=ax.transAxes, ha="right", va="top",
+    clock_text = ax.text(0.98, 0.97, "", transform=ax.transAxes, ha="right", va="top",
                     fontsize=14, family="monospace")
     arrow_artists = []
-
-    # reflectivity over the day
-    ax_day.plot(hours, refl, color="0.85", lw=2)             # full day (faint)
-    refl_line, = ax_day.plot([], [], color="#4a4", lw=2, label="reflectivity")
-    abs_line, = ax_day.plot([], [], color="#c44", lw=2, label="absorbed")
-    refl_dot, = ax_day.plot([], [], "o", color="#4a4")
-    ax_day.axhline(day_avg, color="#4a4", ls="--", lw=1,
-                   label=f"daily average reflectivity = {day_avg:.3f}")
-    ax_day.set_xlim(SUNRISE_HOUR, SUNSET_HOUR)
-    ax_day.set_ylim(0, 1.05)
-    ax_day.set_xlabel("time of day [h]")
-    ax_day.set_ylabel("fraction of sunlight hitting the roof")
-    ax_day.set_title("Reflectivity over the day")
-    ax_day.legend(loc="lower center", fontsize=9)
-    ax_day.grid(alpha=0.3)
 
     def update(i):
         f = frames[i]
@@ -178,9 +225,7 @@ def main():
 
         e = np.radians(angles[i])
         sun_dot.set_data([center[0] + sun_r * np.cos(e)], [center[1] + sun_r * np.sin(e)])
-        h = hours[i]
-        clock.set_text(f"{int(h):02d}:{int(round(h % 1 * 60)) % 60:02d}\n"
-                       f"sun {angles[i]:5.1f}°")
+        clock_text.set_text(f"{clock(hours[i])}\nsun {angles[i]:5.1f}°")
         title = "Rooftop over the day"
         if np.isnan(f["reflectivity"]):
             title += "   (sun behind the roof)"
@@ -195,14 +240,18 @@ def main():
                 arrowprops=dict(arrowstyle="-|>", color="darkorange", lw=2,
                                 mutation_scale=15)))
 
-        refl_line.set_data(hours[:i + 1], refl[:i + 1])
-        abs_line.set_data(hours[:i + 1], absorbed[:i + 1])
-        refl_dot.set_data([hours[i]], [refl[i]])
-        return [rays, sun_dot, clock, refl_line, abs_line, refl_dot, *arrow_artists]
+        return [rays, sun_dot, clock_text, *arrow_artists]
 
     plt.tight_layout()
     anim = FuncAnimation(fig, update, frames=N_FRAMES, interval=1000 / FPS)
 
+    if SAVE_MP4:
+        if FFMpegWriter.isAvailable():
+            print(f"saving {SAVE_MP4} ...")
+            anim.save(SAVE_MP4, writer=FFMpegWriter(fps=FPS, bitrate=4000), dpi=150)
+            print("done")
+        else:
+            print("cannot save mp4: ffmpeg not found (install with: sudo apt install ffmpeg)")
     if SAVE_GIF:
         print(f"saving {SAVE_GIF} ...")
         anim.save(SAVE_GIF, writer=PillowWriter(fps=FPS))
