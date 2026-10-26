@@ -46,8 +46,8 @@ MATERIAL_B = dict(diffusion=0.6, absorption=0.5)
 SUN_ELEVATION = 140.0    # [deg] 90 = overhead, < 90 sun on the right, > 90 on the left
 
 # ---- simulation ------------------------------------------------------------
-N_SUN_RAYS = 1000        # parallel rays of sunlight
-N_DIFFUSE = 100          # rays a (non-mirror) reflection is split into
+N_SUN_RAYS = 10        # parallel rays of sunlight
+N_DIFFUSE = 10          # rays a (non-mirror) reflection is split into
 MAX_DEPTH = 4            # max number of bounces per ray
 MIN_INTENSITY = 1e-4     # rays carrying less energy than this are dropped
 GLOSS_SHARPNESS = 20.0   # how fast the reflection lobe narrows as diffusion -> 0
